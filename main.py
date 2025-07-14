@@ -68,8 +68,7 @@ async def main():
     sent_ids = load_sent_ids()
     messages = []
 
-    try:
-    entity = await client.get_entity(source)
+    
 except ValueError:
     print(f"❌ Cannot resolve '{source}'. Please make sure it's a valid channel username or ID.")
     return
