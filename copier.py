@@ -31,11 +31,11 @@ def load_config():
         json.dump(config, f, indent=2)
     return config
 
-def edit_channels(client):
+async def edit_channels(client):
     with open(CONFIG_FILE, 'r') as f:
         config = json.load(f)
 
-    dialogs = client.get_dialogs()
+    dialogs = await client.get_dialogs()
     channels = [d for d in dialogs if d.is_channel]
 
     def choose_channel(prompt):
@@ -62,7 +62,7 @@ async def clone_messages():
     client = TelegramClient(SESSION_FILE, config["api_id"], config["api_hash"])
     await client.start(phone=config["phone"])
 
-    config = edit_channels(client)
+    config = await edit_channels(client)
 
     dialogs = await client.get_dialogs()
     src_entity = next((d.entity for d in dialogs if d.name == config["source_channel"]), None)
