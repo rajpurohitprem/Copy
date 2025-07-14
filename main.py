@@ -5,60 +5,23 @@ from tqdm import tqdm
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 
-# Configuration file
-CONFIG_FILE = 'config.json'
+# Session and data files
 SESSION_FILE = 'anon.session'
 SENT_IDS_FILE = 'sent_ids.txt'
 ERRORS_FILE = 'errors.txt'
 
-# Default config template
-DEFAULT_CONFIG = {
-    'api_id': '',
-    'api_hash': '',
-    'phone_number': '',
-    'source_channel_name': '',
-    'target_channel_name': ''
-}
-
-def load_config():
-    """Load or create configuration file"""
-    if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(DEFAULT_CONFIG, f, indent=4)
-        print(f"Created {CONFIG_FILE}. Please fill in your details.")
-        exit()
-    
-    with open(CONFIG_FILE, 'r') as f:
-        config = json.load(f)
-    
-    # Validate config
-    required_fields = ['api_id', 'api_hash', 'phone_number', 'source_channel_name', 'target_channel_name']
-    for field in required_fields:
-        if not config.get(field):
-            print(f"Please fill in '{field}' in {CONFIG_FILE}")
-            exit()
-    
-    return config
-
-def edit_config():
-    """Edit configuration interactively"""
-    config = load_config()
-    
-    print("\nCurrent configuration:")
-    for key, value in config.items():
-        print(f"{key}: {value}")
-    
-    print("\nEdit configuration (leave blank to keep current value):")
-    for key in config.keys():
-        new_value = input(f"{key} [{config[key]}]: ").strip()
-        if new_value:
-            config[key] = new_value
-    
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
-    
-    print("Configuration updated successfully!")
-    return config
+async def get_input(prompt, is_phone=False, is_password=False):
+    """Get user input with optional masking for sensitive data"""
+    if is_password:
+        import getpass
+        return getpass.getpass(prompt)
+    if is_phone:
+        while True:
+            phone = input(prompt)
+            if phone.startswith('+') and phone[1:].isdigit():
+                return phone
+            print("Please enter phone number in international format (+1234567890)")
+    return input(prompt)
 
 def load_sent_ids():
     """Load already sent message IDs"""
@@ -143,25 +106,34 @@ async def copy_message(client, source_entity, target_entity, message, progress_b
         log_error(f"Error copying message {message.id}: {str(e)}")
         return False
 
+async def setup_client():
+    """Setup Telegram client with user input"""
+    print("Telegram Channel Copier - Initial Setup\n")
+    
+    api_id = await get_input("Enter your API ID: ")
+    api_hash = await get_input("Enter your API Hash: ")
+    phone_number = await get_input("Enter your phone number (international format, e.g., +1234567890): ", is_phone=True)
+    source_channel = await get_input("Enter source channel name (exact match): ")
+    target_channel = await get_input("Enter target channel name (exact match): ")
+    
+    client = TelegramClient(SESSION_FILE, api_id, api_hash)
+    await client.start(phone=phone_number)
+    
+    return client, source_channel, target_channel
+
 async def main():
     """Main function to run the script"""
-    # Load configuration
-    config = load_config()
-    
-    # Initialize client
-    client = TelegramClient(SESSION_FILE, config['api_id'], config['api_hash'])
-    
-    # Connect to Telegram
+    # Initialize client and get channels
     try:
-        await client.start(phone=config['phone_number'])
+        client, source_channel, target_channel = await setup_client()
     except Exception as e:
-        print(f"Failed to connect: {str(e)}")
+        print(f"Failed to setup client: {str(e)}")
         return
     
     # Get source and target channels
     try:
-        source_entity = await get_entity_by_name(client, config['source_channel_name'])
-        target_entity = await get_entity_by_name(client, config['target_channel_name'])
+        source_entity = await get_entity_by_name(client, source_channel)
+        target_entity = await get_entity_by_name(client, target_channel)
     except Exception as e:
         print(str(e))
         return
@@ -170,7 +142,7 @@ async def main():
     sent_ids = load_sent_ids()
     
     # Get all messages from source channel
-    print(f"Fetching messages from '{config['source_channel_name']}'...")
+    print(f"\nFetching messages from '{source_channel}'...")
     messages = []
     async for message in client.iter_messages(source_entity):
         messages.append(message)
@@ -182,21 +154,17 @@ async def main():
         print("No new messages to copy.")
         return
     
-    print(f"Found {len(new_messages)} new messages to copy to '{config['target_channel_name']}'")
+    print(f"Found {len(new_messages)} new messages to copy to '{target_channel}'")
     
     # Copy messages with progress bar
     with tqdm(total=len(new_messages), desc="Copying messages") as pbar:
         for message in reversed(new_messages):  # Copy in chronological order
             await copy_message(client, source_entity, target_entity, message, pbar)
     
-    print("Done!")
+    print("\nDone!")
 
 if __name__ == '__main__':
     import asyncio
-    
-    # Check if user wants to edit config
-    if input("Edit configuration before starting? (y/N): ").lower() == 'y':
-        edit_config()
     
     # Run the main function
     asyncio.run(main())
