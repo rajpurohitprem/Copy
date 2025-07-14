@@ -2,7 +2,7 @@ import os
 import json
 from datetime import datetime
 from tqdm import tqdm
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 
 # Session and data files
@@ -10,18 +10,58 @@ SESSION_FILE = 'anon.session'
 SENT_IDS_FILE = 'sent_ids.txt'
 ERRORS_FILE = 'errors.txt'
 
-async def get_input(prompt, is_phone=False, is_password=False):
-    """Get user input with optional masking for sensitive data"""
+async def get_input(prompt, is_phone=False, is_password=False, default=None):
+    """Get user input with optional masking and default values"""
     if is_password:
         import getpass
-        return getpass.getpass(prompt)
+        prompt_text = prompt
+        if default:
+            prompt_text += f" [default: ******]: "
+        return getpass.getpass(prompt_text) or default
+    
+    prompt_text = prompt
+    if default:
+        prompt_text += f" [default: {default}]: "
+    
     if is_phone:
         while True:
-            phone = input(prompt)
-            if phone.startswith('+') and phone[1:].isdigit():
+            phone = input(prompt_text) or default
+            if phone and phone.startswith('+') and phone[1:].isdigit():
                 return phone
             print("Please enter phone number in international format (+1234567890)")
-    return input(prompt)
+    else:
+        return input(prompt_text) or default
+
+async def get_config_from_input():
+    """Get configuration from user input"""
+    print("\nTelegram Channel Copier - Configuration\n")
+    
+    # Try to load previous config from session metadata
+    prev_api_id = None
+    prev_api_hash = None
+    prev_phone = None
+    if os.path.exists(SESSION_FILE):
+        try:
+            client = TelegramClient(SESSION_FILE, 0, "")
+            await client.connect()
+            if await client.is_user_authorized():
+                session_info = client.session
+                prev_api_id = getattr(session_info, 'api_id', None)
+                prev_api_hash = getattr(session_info, 'api_hash', None)
+                prev_phone = getattr(session_info, '_phone', None)
+            await client.disconnect()
+        except:
+            pass
+    
+    config = {
+        'api_id': await get_input("Enter your API ID: ", default=prev_api_id),
+        'api_hash': await get_input("Enter your API Hash: ", default=prev_api_hash),
+        'phone_number': await get_input("Enter your phone number (+1234567890): ", is_phone=True, default=prev_phone),
+        'source_channel': await get_input("Enter source channel name (exact match): "),
+        'target_channel': await get_input("Enter target channel name (exact match): ")
+    }
+    
+    return config
 
 def load_sent_ids():
     """Load already sent message IDs"""
@@ -106,34 +146,25 @@ async def copy_message(client, source_entity, target_entity, message, progress_b
         log_error(f"Error copying message {message.id}: {str(e)}")
         return False
 
-async def setup_client():
-    """Setup Telegram client with user input"""
-    print("Telegram Channel Copier - Initial Setup\n")
-    
-    api_id = await get_input("Enter your API ID: ")
-    api_hash = await get_input("Enter your API Hash: ")
-    phone_number = await get_input("Enter your phone number (international format, e.g., +1234567890): ", is_phone=True)
-    source_channel = await get_input("Enter source channel name (exact match): ")
-    target_channel = await get_input("Enter target channel name (exact match): ")
-    
-    client = TelegramClient(SESSION_FILE, api_id, api_hash)
-    await client.start(phone=phone_number)
-    
-    return client, source_channel, target_channel
-
 async def main():
     """Main function to run the script"""
-    # Initialize client and get channels
+    # Get configuration from user input
+    config = await get_config_from_input()
+    
+    # Initialize client
+    client = TelegramClient(SESSION_FILE, int(config['api_id']), config['api_hash'])
+    
+    # Connect to Telegram
     try:
-        client, source_channel, target_channel = await setup_client()
+        await client.start(phone=config['phone_number'])
     except Exception as e:
-        print(f"Failed to setup client: {str(e)}")
+        print(f"Failed to connect: {str(e)}")
         return
     
     # Get source and target channels
     try:
-        source_entity = await get_entity_by_name(client, source_channel)
-        target_entity = await get_entity_by_name(client, target_channel)
+        source_entity = await get_entity_by_name(client, config['source_channel'])
+        target_entity = await get_entity_by_name(client, config['target_channel'])
     except Exception as e:
         print(str(e))
         return
@@ -142,7 +173,7 @@ async def main():
     sent_ids = load_sent_ids()
     
     # Get all messages from source channel
-    print(f"\nFetching messages from '{source_channel}'...")
+    print(f"\nFetching messages from '{config['source_channel']}'...")
     messages = []
     async for message in client.iter_messages(source_entity):
         messages.append(message)
@@ -154,7 +185,7 @@ async def main():
         print("No new messages to copy.")
         return
     
-    print(f"Found {len(new_messages)} new messages to copy to '{target_channel}'")
+    print(f"Found {len(new_messages)} new messages to copy to '{config['target_channel']}'")
     
     # Copy messages with progress bar
     with tqdm(total=len(new_messages), desc="Copying messages") as pbar:
@@ -165,6 +196,4 @@ async def main():
 
 if __name__ == '__main__':
     import asyncio
-    
-    # Run the main function
     asyncio.run(main())
