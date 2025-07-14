@@ -1,26 +1,15 @@
-# Session files
 anon.session*
-
-# Python compiled files
 *.pyc
 __pycache__/
-
-# Temporary media files
 *.jpg
 *.jpeg
 *.png
-*.gif
 *.mp4
-*.mov
-*.webm
 *.mp3
-*.ogg
-*.wav
+*.webp
+*.mkv
 *.pdf
-*.zip
-*.rar
-
-# Data files
+*.docx
 sent_ids.txt
 errors.txt
 config.json
