@@ -12,18 +12,16 @@ SENT_LOG = "sent_ids.txt"
 ERROR_LOG = "errors.txt"
 SKIPPED_MEDIA_LOG = "skipped_media.txt"
 
-MEDIA_EXTENSIONS = ('.mp4', '.mkv', '.jpg', '.jpeg', '.png', '.webp', '.mp3')
-
-# Load config or ask user
+# Load config or prompt
 def load_config():
     config = {}
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             config = json.load(f)
 
-    def prompt(key, prompt_text):
+    def prompt(key, text):
         if key not in config or not config[key]:
-            config[key] = input(prompt_text)
+            config[key] = input(text)
         return config[key]
 
     prompt("api_id", "API ID: ")
@@ -44,22 +42,18 @@ def load_sent_ids():
             return set(f.read().splitlines())
     return set()
 
-# Append new sent message ID
 def save_sent_id(msg_id):
     with open(SENT_LOG, "a") as f:
         f.write(str(msg_id) + "\n")
 
-# Log errors
 def log_error(text):
     with open(ERROR_LOG, "a") as f:
         f.write(text + "\n")
 
-# Log skipped media
 def log_skipped_media(msg_id, media_type, reason):
     with open(SKIPPED_MEDIA_LOG, "a") as f:
         f.write(f"{msg_id} - {media_type} - {reason}\n")
 
-# Main logic
 async def clone_messages():
     config = load_config()
 
@@ -67,12 +61,11 @@ async def clone_messages():
     await client.start(phone=config["phone"])
 
     dialogs = await client.get_dialogs()
-
     src_entity = next((d.entity for d in dialogs if d.name == config["source_channel"]), None)
     tgt_entity = next((d.entity for d in dialogs if d.name == config["target_channel"]), None)
 
     if not src_entity or not tgt_entity:
-        print("❌ Channel not found. Check config names.")
+        print("❌ Source or target channel not found. Check names.")
         return
 
     history = await client(GetHistoryRequest(
@@ -98,10 +91,8 @@ async def clone_messages():
             continue
 
         try:
-            # Handle media
             if msg.media:
                 try:
-                    print(f"📥 Downloading media from msg {msg.id}...")
                     file_path = await msg.download_media()
                     if file_path:
                         await client.send_file(
@@ -120,16 +111,16 @@ async def clone_messages():
                     log_error(f"Media Error [{msg.id}]: {e}")
                     log_skipped_media(msg.id, str(type(msg.media)), f"EXCEPTION: {e}")
                     print(f"❌ Error sending media msg {msg.id}: {e}")
+            else:
+                # ✅ Text message handling FIXED
+                text_content = msg.text or msg.message
+                if text_content:
+                    await client.send_message(tgt_entity, text_content)
+                    print(f"✉️ Sent text msg {msg.id}")
                 else:
-                    text_content = msg.text or msg.message
-                    if text_content:
-                        await client.send_message(tgt_entity, text_content)
-                        print(f"✉️ Sent text msg {msg.id}")
-                    else:
-                        print(f"⚠️ Skipped empty text message {msg.id}")
-                        log_skipped_media(msg.id, "text", f"Empty message body: {repr(msg.to_dict())}")
+                    log_skipped_media(msg.id, "text", "Empty message body")
+                    print(f"⚠️ Skipped empty text message {msg.id}")
 
-            # Handle pinning
             if msg.pinned:
                 try:
                     last = (await client.get_messages(tgt_entity, limit=1))[0]
