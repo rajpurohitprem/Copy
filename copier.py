@@ -1,120 +1,172 @@
-import os, re, json, asyncio, logging
+import os
+import json
+import asyncio
+import logging
+import time
 from tqdm import tqdm
 from telethon.sync import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest, UpdatePinnedMessageRequest
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.types import MessageService
 
-# Paths & logging
 CONFIG_FILE = "config.json"
 SESSION_FILE = "anon"
 SENT_LOG = "sent_ids.txt"
 ERROR_LOG = "errors.txt"
+
 logging.getLogger("telethon.network.mtprotosender").setLevel(logging.ERROR)
 
-# Helpers
-def load_cfg(): return json.load(open(CONFIG_FILE)) if os.path.exists(CONFIG_FILE) else {}
-def save_cfg(c): json.dump(c, open(CONFIG_FILE, "w"), indent=2)
-def log_err(m): open(ERROR_LOG,"a").write(m+"\n")
-def progress_cb(total):
-    bar = tqdm(total=total, unit="B", unit_scale=True)
-    def cb(cur, tot):
-        bar.total = tot; bar.n = cur; bar.refresh()
-        if cur >= tot: bar.close()
-    return cb
+def save_config(config):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=4)
 
-def extract_id(link):
-    m = re.search(r'/(\d+)(?:\?.*)?$', link)
-    return int(m.group(1)) if m else None
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    return {}
 
-async def select_ch(client, label):
+def save_sent_id(msg_id):
+    with open(SENT_LOG, "a") as f:
+        f.write(f"{msg_id}\n")
+
+def load_sent_ids():
+    if os.path.exists(SENT_LOG):
+        with open(SENT_LOG) as f:
+            return set(int(line.strip()) for line in f)
+    return set()
+
+def log_error(msg):
+    with open(ERROR_LOG, "a") as f:
+        f.write(msg + "\n")
+
+def progress_bar_callback(total):
+    bar = tqdm(total=total, unit='B', unit_scale=True)
+    def callback(current, total):
+        bar.total = total
+        bar.n = current
+        bar.refresh()
+        if current == total:
+            bar.close()
+    return callback
+
+async def select_channel(client, prompt):
+    print(f"\n🔍 Fetching channels for: {prompt}")
     dialogs = await client.get_dialogs()
-    options = [d for d in dialogs if d.is_channel or d.is_group]
-    for i, d in enumerate(options, 1):
-        print(f"{i}. {d.name}")
-    idx = int(input(f"Select {label} number: ")) - 1
-    return options[idx].name
+    channels = [d for d in dialogs if d.is_channel]
+    for i, ch in enumerate(channels):
+        print(f"{i+1}. {ch.name} [{ch.id}]")
+    idx = int(input(f"Select {prompt} (1-{len(channels)}): ")) - 1
+    return channels[idx].id
 
-async def setup_config():
-    cfg = load_cfg()
-    if input("🔧 Change full config? (y/n): ").lower()=="y" or not cfg.get("api_id"):
-        cfg["api_id"]=int(input("API ID: "))
-        cfg["api_hash"]=input("API Hash: ")
-        cfg["phone"]=input("Phone (+...): ")
+async def interactive_config():
+    config = {}
+    config["api_id"] = int(input("API ID: "))
+    config["api_hash"] = input("API Hash: ")
+    config["phone"] = input("Phone number (with +91...): ")
 
-    async with TelegramClient(SESSION_FILE, cfg["api_id"], cfg["api_hash"]) as cli:
-        if not await cli.is_user_authorized():
-            await cli.send_code_request(cfg["phone"])
-            code=input("🔐 Enter code: ")
-            try: await cli.sign_in(cfg["phone"], code)
+    async with TelegramClient(SESSION_FILE, config["api_id"], config["api_hash"]) as client:
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.send_code_request(config["phone"])
+            code = input("🔐 Enter the code you received: ")
+            try:
+                await client.sign_in(config["phone"], code)
             except SessionPasswordNeededError:
-                pwd=input("2FA password: ")
-                await cli.sign_in(password=pwd)
-        if input("🔁 Change channels? (y/n): ").lower()=="y" or not cfg.get("source_channel"):
-            cfg["source_channel"] = await select_ch(cli, "Source Channel")
-            cfg["target_channel"] = await select_ch(cli, "Target Channel")
-    save_cfg(cfg)
-    return cfg
+                password = input("💬 2FA password: ")
+                await client.sign_in(password=password)
 
-async def clone():
-    cfg = await setup_config()
-    client = TelegramClient(SESSION_FILE, cfg["api_id"], cfg["api_hash"])
+        config["source_channel"] = await select_channel(client, "Source Channel")
+        config["target_channel"] = await select_channel(client, "Target Channel")
+
+    save_config(config)
+    return config
+
+async def update_source_target(config):
+    async with TelegramClient(SESSION_FILE, config["api_id"], config["api_hash"]) as client:
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.send_code_request(config["phone"])
+            code = input("🔐 Enter the code you received: ")
+            await client.sign_in(config["phone"], code)
+
+        config["source_channel"] = await select_channel(client, "Source Channel")
+        config["target_channel"] = await select_channel(client, "Target Channel")
+    save_config(config)
+    return config
+
+async def clone_messages():
+    config = load_config()
+    
+    if input("⚙️ Do you want to change config? (y/n): ").lower() == "y":
+        config = await interactive_config()
+    elif input("🔁 Do you want to change source and target channel? (y/n): ").lower() == "y":
+        config = await update_source_target(config)
+
+    client = TelegramClient(SESSION_FILE, config["api_id"], config["api_hash"])
     await client.start()
+    sent_ids = load_sent_ids()
 
-    src = await client.get_entity(cfg["source_channel"])
-    tgt = await client.get_entity(cfg["target_channel"])
+    src_entity = await client.get_entity(config["source_channel"])
+    tgt_entity = await client.get_entity(config["target_channel"])
 
-    # Define range
-    start_id = 0; end_id = None
-    if input("📌 Custom range? (y/n): ").lower()=="y":
-        s_link = input("🔹 Start message link: ").strip()
-        start_id = extract_id(s_link) - 1
-        e_link = input("🔹 End message link: ").strip()
-        end_id = extract_id(e_link)
-
-    total_copied = 0
-    offset_id = start_id
+    offset_id = 0
+    limit = 100
+    total = 0
 
     while True:
-        hist = await client(GetHistoryRequest(
-            peer=src, offset_id=offset_id, limit=100,
-            max_id=0, min_id=0, add_offset=0, hash=0
+        history = await client(GetHistoryRequest(
+            peer=src_entity,
+            offset_id=offset_id,
+            offset_date=None,
+            add_offset=0,
+            limit=limit,
+            max_id=0,
+            min_id=0,
+            hash=0
         ))
-        msgs = hist.messages
-        if not msgs: break
 
-        for msg in reversed(msgs):
-            if msg.id <= start_id: continue
-            if end_id is not None and msg.id > end_id: continue
+        messages = history.messages
+        if not messages:
+            break
 
+        for msg in reversed(messages):
             try:
+                offset_id = msg.id
+                if msg.id in sent_ids or isinstance(msg, MessageService):
+                    continue
+
                 if msg.media:
-                    path = await client.download_media(
-                        msg, progress_callback=progress_cb(
-                            getattr(msg.media, "document", msg.media).size if hasattr(msg.media, "document") else 0
-                        )
+                    file_path = await client.download_media(
+                        msg,
+                        progress_callback=progress_bar_callback(msg.media.document.size if hasattr(msg.media, 'document') else 100)
                     )
                     await client.send_file(
-                        tgt, path, caption=msg.text or "",
-                        progress_callback=progress_cb(os.path.getsize(path))
+                        tgt_entity,
+                        file_path,
+                        caption=msg.text or "",
+                        progress_callback=progress_bar_callback(os.path.getsize(file_path))
                     )
-                    os.remove(path)
+                    os.remove(file_path)
                 else:
-                    text = msg.text or msg.message
-                    if text:
-                        await client.send_message(tgt, text)
+                    if msg.text:
+                        await client.send_message(tgt_entity, msg.text)
+
                 if msg.pinned:
-                    last = (await client.get_messages(tgt, limit=1))[0]
-                    await client(UpdatePinnedMessageRequest(peer=tgt, id=last.id, silent=False))
-                offset_id = msg.id
-                total_copied += 1
-                await asyncio.sleep(1)
+                    await client(UpdatePinnedMessageRequest(
+                        peer=tgt_entity,
+                        id=msg.id,
+                        silent=False
+                    ))
+
+                save_sent_id(msg.id)
+                sent_ids.add(msg.id)
+                total += 1
+                time.sleep(1)  # Pause between messages
             except Exception as e:
-                log_err(f"[{msg.id}] {e}")
+                log_error(f"[{msg.id}] {str(e)}")
 
-        if len(msgs)<100 or (end_id is not None and offset_id>=end_id): break
+    print(f"✅ Done. {total} messages copied.")
 
-    print(f"✅ Done! Copied {total_copied} messages.")
-
-if __name__=="__main__":
-    asyncio.run(clone())
+if __name__ == "__main__":
+    asyncio.run(clone_messages())
