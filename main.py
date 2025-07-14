@@ -1,9 +1,9 @@
-from telethon.sync import TelegramClient
-from telethon.tl.functions.messages import GetHistoryRequest, UpdatePinnedMessageRequest
-from telethon.tl.types import Message
-from tqdm import tqdm
 import os
 import json
+from telethon.sync import TelegramClient
+from telethon.tl.functions.messages import GetHistoryRequest, UpdatePinnedMessageRequest
+from telethon.tl.types import MessageService, Message
+from tqdm import tqdm
 import asyncio
 
 CONFIG_FILE = "config.json"
@@ -11,37 +11,44 @@ SESSION_FILE = "anon"
 SENT_LOG = "sent_ids.txt"
 ERROR_LOG = "errors.txt"
 
-# Supported media types for cleanup
-MEDIA_EXTENSIONS = ['.jpg', '.png', '.mp4', '.mp3', '.mkv', '.webp', '.pdf', '.docx', '.zip']
-
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             return json.load(f)
     else:
-        return setup_config()
+        return {}
 
-def setup_config():
-    config = {}
-    config["api_id"] = int(input("API ID: "))
-    config["api_hash"] = input("API Hash: ")
-    config["phone"] = input("Phone number (with country code): ")
-    config["source_channel"] = input("Source Channel username or ID: ")
-    config["target_channel"] = input("Target Channel username or ID: ")
+def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
+
+def prompt_config():
+    print("First-time setup or edit config.")
+    api_id = int(input("API ID: "))
+    api_hash = input("API Hash: ")
+    phone = input("Phone (with country code): ")
+    source_channel = input("Source Channel NAME (not username): ")
+    target_channel = input("Target Channel NAME (not username): ")
+
+    config = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "phone": phone,
+        "source_channel": source_channel,
+        "target_channel": target_channel
+    }
+    save_config(config)
     return config
 
-def edit_config():
-    config = load_config()
-    print("Edit config (press Enter to keep current value):")
-    for key in ["source_channel", "target_channel"]:
-        new_val = input(f"{key} [{config[key]}]: ")
-        if new_val.strip():
-            config[key] = new_val
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
-    print("Config updated.")
+def prompt_edit_channels(config):
+    print("Current Channels:")
+    print(f"Source: {config['source_channel']}")
+    print(f"Target: {config['target_channel']}")
+    if input("Edit source/target? (y/N): ").lower() == 'y':
+        config['source_channel'] = input("New Source Channel NAME: ")
+        config['target_channel'] = input("New Target Channel NAME: ")
+        save_config(config)
+    return config
 
 def load_sent_ids():
     if not os.path.exists(SENT_LOG):
@@ -55,96 +62,80 @@ def save_sent_id(msg_id):
 
 def log_error(error):
     with open(ERROR_LOG, "a") as f:
-        f.write(f"{str(error)}\n")
+        f.write(f"{error}\n")
 
 async def main():
-    config = load_config()
-    client = TelegramClient(SESSION_FILE, config["api_id"], config["api_hash"])
-    await client.start(phone=config["phone"])
+    config = load_config() or prompt_config()
+    config = prompt_edit_channels(config)
 
-    source = config["source_channel"]
-    target = config["target_channel"]
-
-    sent_ids = load_sent_ids()
-    messages = []
+    client = TelegramClient(SESSION_FILE, config['api_id'], config['api_hash'])
+    await client.start(phone=config['phone'])
 
     try:
-        entity = await client.get_entity(source)
+        source = await client.get_entity(config['source_channel'])
+        target = await client.get_entity(config['target_channel'])
+    except Exception as e:
+        log_error(f"Failed to fetch entities: {e}")
+        return
+
+    sent_ids = load_sent_ids()
+    all_messages = []
+    offset_id = 0
+    limit = 100
+
+    print("Fetching messages...")
+    while True:
         history = await client(GetHistoryRequest(
-            peer=entity,
-            limit=0,
+            peer=source,
+            offset_id=offset_id,
             offset_date=None,
-            offset_id=0,
+            add_offset=0,
+            limit=limit,
             max_id=0,
             min_id=0,
-            add_offset=0,
             hash=0
         ))
-        total = history.count
+        if not history.messages:
+            break
+        messages = history.messages
+        all_messages.extend(messages)
+        offset_id = messages[-1].id
 
-        print(f"Total messages in source: {total}")
+    new_messages = [msg for msg in all_messages if msg.id not in sent_ids and isinstance(msg, Message)]
 
-        offset_id = 0
-        batch_size = 100
+    print(f"Found {len(new_messages)} new messages.")
+    for msg in tqdm(reversed(new_messages), desc="Copying"):
+        try:
+            if msg.media:
+                file_path = await client.download_media(msg.media)
+                sent_msg = await client.send_file(
+                    target,
+                    file_path,
+                    caption=msg.message or None,
+                    parse_mode='html'
+                )
+                os.remove(file_path)
+            else:
+                sent_msg = await client.send_message(
+                    target,
+                    msg.message or '',
+                    parse_mode='html'
+                )
 
-        pbar = tqdm(total=total, desc="Copying Messages")
-        while True:
-            history = await client(GetHistoryRequest(
-                peer=entity,
-                limit=batch_size,
-                offset_id=offset_id,
-                offset_date=None,
-                add_offset=0,
-                max_id=0,
-                min_id=0,
-                hash=0
-            ))
+            if msg.pinned:
+                await client(UpdatePinnedMessageRequest(
+                    peer=target,
+                    id=sent_msg.id,
+                    silent=True
+                ))
 
-            if not history.messages:
-                break
+            save_sent_id(msg.id)
 
-            for msg in reversed(history.messages):
-                offset_id = msg.id
-                if msg.id in sent_ids:
-                    continue
+        except Exception as e:
+            log_error(f"Error on msg {msg.id}: {e}")
 
-                try:
-                    file = None
-                    if msg.media:
-                        file = await client.download_media(msg)
-                    
-                    sent = await client.send_message(
-                        entity=target,
-                        message=msg.message or '',
-                        file=file if os.path.exists(file) else None,
-                        link_preview=False
-                    )
-
-                    if msg.pinned:
-                        await client(UpdatePinnedMessageRequest(
-                            peer=target,
-                            id=sent.id,
-                            silent=True
-                        ))
-
-                    save_sent_id(msg.id)
-
-                    # Delete media file after use
-                    if file and os.path.exists(file):
-                        os.remove(file)
-
-                except Exception as e:
-                    log_error(f"[{msg.id}] {str(e)}")
-                pbar.update(1)
-
-        pbar.close()
-        print("Done.")
-
-    finally:
-        await client.disconnect()
+    await client.disconnect()
+    print("Done!")
 
 if __name__ == "__main__":
-    choice = input("Edit source/target channels? (y/n): ").strip().lower()
-    if choice == 'y':
-        edit_config()
     asyncio.run(main())
