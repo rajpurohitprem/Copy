@@ -87,6 +87,7 @@ async def clone_messages():
                         )
                         os.remove(file_path)
                         print(f"✅ Sent media msg {msg.id}")
+                        await asyncio.sleep(1)  # Delay of 1 second
                     else:
                         log_skipped_media(msg.id, str(type(msg.media)), "download_media() returned None")
                 except Exception as e:
@@ -97,6 +98,7 @@ async def clone_messages():
                 if text:
                     await client.send_message(tgt_entity, text)
                     print(f"✉️ Sent text msg {msg.id}")
+                    await asyncio.sleep(1)  # Delay of 1 second
                 else:
                     log_skipped_media(msg.id, "text", "Empty message body")
 
