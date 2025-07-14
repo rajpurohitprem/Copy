@@ -1,0 +1,15 @@
+anon.session*
+__pycache__/
+*.pyc
+*.jpg
+*.png
+*.mp4
+*.mp3
+*.mkv
+*.webp
+*.pdf
+*.docx
+*.zip
+config.json
+sent_ids.txt
+errors.txt
