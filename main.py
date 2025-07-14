@@ -8,102 +8,148 @@ from telethon.tl.types import (
     MessageMediaDocument,
     MessageMediaWebPage
 )
+from telethon.utils import get_extension
 
 # Configuration files
 CONFIG_FILE = 'config.json'
 SESSION_FILE = 'anon.session'
 SENT_IDS_FILE = 'sent_ids.txt'
 ERRORS_FILE = 'errors.txt'
+MAX_FILE_SIZE = 1.5 * 1024 * 1024 * 1024  # 1.5GB in bytes
 
-def load_config():
-    """Load configuration from file or return None if doesn't exist"""
+class UploadProgressBar:
+    def __init__(self, message, filename):
+        self.message = message
+        self.filename = filename
+        self.pbar = None
+
+    async def callback(self, current, total):
+        if self.pbar is None:
+            self.pbar = tqdm(
+                desc=f"Uploading {self.filename}",
+                total=total,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024
+            )
+        self.pbar.update(current - self.pbar.n)
+
+def load_or_create_config():
+    """Load existing config or create new one with user input"""
+    config = {}
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return None
-
-def save_config(config):
-    """Save configuration to file"""
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
-
-async def get_input(prompt, is_phone=False, is_password=False, default=None):
-    """Get user input with validation"""
-    if is_password:
-        import getpass
-        return getpass.getpass(prompt)
+            config = json.load(f)
     
-    if is_phone:
-        while True:
-            phone = input(prompt)
-            if phone.startswith('+') and phone[1:].isdigit():
-                return phone
-            print("Please enter in international format (+1234567890)")
-    return input(prompt)
-
-async def setup_config():
-    """Get configuration either from file or user input"""
-    config = load_config()
-    
-    if config and all(k in config for k in ['api_id', 'api_hash', 'phone_number']):
-        print("\nLoaded existing configuration:")
-        print(f"API ID: {config['api_id']}")
-        print(f"Phone: {config['phone_number'][:3]}*****{config['phone_number'][-2:]}")
-        
-        use_existing = input("\nUse existing credentials? (Y/n): ").strip().lower()
-        if use_existing in ('', 'y', 'yes'):
-            config['source_channel'] = await get_input("Enter source channel name: ")
-            config['target_channel'] = await get_input("Enter target channel name: ")
-            return config
-    
-    print("\nTelegram Channel Copier - Initial Setup\n")
-    config = {
-        'api_id': await get_input("Enter your API ID: "),
-        'api_hash': await get_input("Enter your API Hash: "),
-        'phone_number': await get_input("Enter phone number (+1234567890): ", is_phone=True),
-        'source_channel': await get_input("Enter source channel name: "),
-        'target_channel': await get_input("Enter target channel name: ")
+    required_fields = {
+        'api_id': ("Enter your API ID: ", False),
+        'api_hash': ("Enter your API Hash: ", False),
+        'phone_number': ("Enter phone number (+1234567890): ", True),
+        'source_channel': ("Enter source channel name: ", False),
+        'target_channel': ("Enter target channel name: ", False)
     }
-    save_config(config)
+
+    # Check for missing fields
+    missing_fields = [field for field in required_fields if field not in config or not config[field]]
+    
+    if missing_fields:
+        print("\nTelegram Channel Copier - Configuration")
+        print("Please provide the following information:\n")
+        
+        for field in missing_fields:
+            prompt, is_phone = required_fields[field]
+            while True:
+                value = input(prompt).strip()
+                if is_phone:
+                    if value.startswith('+') and value[1:].isdigit():
+                        config[field] = value
+                        break
+                    print("Please enter in international format (+1234567890)")
+                else:
+                    if value:
+                        config[field] = value
+                        break
+                    print("This field cannot be empty")
+        
+        # Save the complete config
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    
     return config
 
-def load_sent_ids():
-    """Load already sent message IDs"""
-    if not os.path.exists(SENT_IDS_FILE):
-        return set()
-    with open(SENT_IDS_FILE, 'r') as f:
-        return set(int(line.strip()) for line in f if line.strip())
-
-def save_sent_id(message_id):
-    """Save a sent message ID"""
-    with open(SENT_IDS_FILE, 'a') as f:
-        f.write(f"{message_id}\n")
-
-def log_error(error):
-    """Log an error to the error file"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with open(ERRORS_FILE, 'a') as f:
-        f.write(f"[{timestamp}] {error}\n")
-
-async def get_entity_by_name(client, name):
-    """Get entity by its name (for channels without username)"""
-    async for dialog in client.iter_dialogs():
-        if dialog.name == name:
-            return dialog.entity
-    raise ValueError(f"Channel '{name}' not found")
+async def copy_large_media(client, target_entity, media, caption):
+    """Handle large media files with progress tracking"""
+    filename = f"temp_{datetime.now().timestamp()}"
+    if hasattr(media, 'document'):
+        ext = get_extension(media.document)
+        filename += ext if ext else ''
+    
+    # Download with progress
+    download_pbar = tqdm(
+        desc=f"Downloading {filename}",
+        unit='B',
+        unit_scale=True,
+        unit_divisor=1024
+    )
+    
+    def download_progress(current, total):
+        download_pbar.total = total
+        download_pbar.update(current - download_pbar.n)
+    
+    media_path = await client.download_media(
+        media,
+        file=f"{filename}",
+        progress_callback=download_progress
+    )
+    download_pbar.close()
+    
+    if not media_path:
+        raise ValueError("Failed to download media")
+    
+    # Check file size
+    file_size = os.path.getsize(media_path)
+    if file_size > MAX_FILE_SIZE:
+        os.remove(media_path)
+        raise ValueError(f"File too large ({file_size/1024/1024:.2f}MB > {MAX_FILE_SIZE/1024/1024:.2f}MB)")
+    
+    # Upload with progress
+    upload_progress = UploadProgressBar(None, os.path.basename(media_path))
+    
+    try:
+        if isinstance(media, MessageMediaPhoto):
+            sent_msg = await client.send_file(
+                target_entity,
+                media_path,
+                caption=caption.strip() or None,
+                parse_mode='html',
+                progress_callback=upload_progress.callback,
+                force_document=False
+            )
+        else:
+            sent_msg = await client.send_file(
+                target_entity,
+                media_path,
+                caption=caption.strip() or None,
+                parse_mode='html',
+                progress_callback=upload_progress.callback,
+                force_document=True,
+                attributes=getattr(media.document, 'attributes', None)
+            )
+        
+        return sent_msg
+    finally:
+        if upload_progress.pbar:
+            upload_progress.pbar.close()
+        if os.path.exists(media_path):
+            os.remove(media_path)
 
 async def copy_message(client, source_entity, target_entity, message, progress_bar=None):
     """Copy a message from source to target channel"""
     try:
-        # Skip if message is empty
         if not message.message and not message.media:
             return False
             
-        # Handle media messages
         if message.media:
-            # Download media file
-            media_path = await client.download_media(message.media, file=bytes)
-            
             # Combine caption and text
             caption = ""
             if message.media.caption:
@@ -111,34 +157,38 @@ async def copy_message(client, source_entity, target_entity, message, progress_b
             if message.message:
                 caption = f"{caption}\n\n{message.message}" if caption else message.message
             
-            # Determine media type and send appropriately
-            if isinstance(message.media, MessageMediaPhoto):
-                sent_msg = await client.send_file(
-                    target_entity,
-                    media_path,
-                    caption=caption.strip() or None,
-                    parse_mode='html'
-                )
-            elif isinstance(message.media, (MessageMediaDocument, MessageMediaWebPage)):
-                # Get file attributes if available
-                attributes = None
-                if hasattr(message.media, 'document') and message.media.document:
-                    attributes = message.media.document.attributes
-                
+            # Handle large files differently
+            if hasattr(message.media, 'document') and message.media.document:
+                file_size = message.media.document.size
+                if file_size > 100 * 1024 * 1024:  # 100MB threshold
+                    sent_msg = await copy_large_media(
+                        client,
+                        target_entity,
+                        message.media,
+                        caption
+                    )
+                else:
+                    media_path = await client.download_media(message.media, file=bytes)
+                    sent_msg = await client.send_file(
+                        target_entity,
+                        media_path,
+                        caption=caption.strip() or None,
+                        parse_mode='html',
+                        attributes=message.media.document.attributes,
+                        force_document=True
+                    )
+            else:
+                media_path = await client.download_media(message.media, file=bytes)
                 sent_msg = await client.send_file(
                     target_entity,
                     media_path,
                     caption=caption.strip() or None,
                     parse_mode='html',
-                    attributes=attributes,
-                    force_document=isinstance(message.media, MessageMediaDocument)
+                    force_document=False
                 )
             
-            # Clean up
             if isinstance(media_path, str) and os.path.exists(media_path):
                 os.remove(media_path)
-        
-        # Handle text-only messages
         else:
             sent_msg = await client.send_message(
                 target_entity,
@@ -146,11 +196,9 @@ async def copy_message(client, source_entity, target_entity, message, progress_b
                 parse_mode='html'
             )
         
-        # Handle pinned messages
         if message.pinned:
             await client.pin_message(target_entity, sent_msg)
         
-        # Save the sent message ID
         save_sent_id(message.id)
         
         if progress_bar:
@@ -164,9 +212,15 @@ async def copy_message(client, source_entity, target_entity, message, progress_b
 
 async def main():
     """Main function to run the script"""
-    config = await setup_config()
+    config = load_or_create_config()
     
-    client = TelegramClient(SESSION_FILE, int(config['api_id']), config['api_hash'])
+    client = TelegramClient(
+        SESSION_FILE,
+        int(config['api_id']),
+        config['api_hash'],
+        connection_retries=5,
+        timeout=3600
+    )
     
     try:
         await client.start(phone=config['phone_number'])
