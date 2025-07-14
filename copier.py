@@ -93,6 +93,8 @@ async def clone_messages():
         try:
             if msg.media:
                 try:
+                    import shutil
+
                     file_path = await msg.download_media()
                     if file_path:
                         await client.send_file(
@@ -100,8 +102,18 @@ async def clone_messages():
                             file_path,
                             caption=msg.text or msg.message
                         )
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
+
+                        # Clean up downloaded file or folder
+                        try:
+                            if os.path.isfile(file_path):
+                                os.remove(file_path)
+                            elif os.path.isdir(file_path):
+                                shutil.rmtree(file_path)
+                            print(f"🗑️ Deleted {file_path}")
+                        except Exception as e:
+                            log_error(f"Cleanup Error [{msg.id}]: {e}")
+                            print(f"⚠️ Failed to delete media {file_path}: {e}")
+
                         print(f"✅ Sent media msg {msg.id}")
                     else:
                         reason = "download_media() returned None"
