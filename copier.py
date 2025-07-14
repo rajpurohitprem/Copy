@@ -120,14 +120,15 @@ async def clone_messages():
                     log_error(f"Media Error [{msg.id}]: {e}")
                     log_skipped_media(msg.id, str(type(msg.media)), f"EXCEPTION: {e}")
                     print(f"❌ Error sending media msg {msg.id}: {e}")
-            else:
-    text_content = msg.text or msg.message
-    if text_content:
-        await client.send_message(tgt_entity, text_content)
-        print(f"✉️ Sent text msg {msg.id}")
-    else:
-        print(f"⚠️ Skipped empty text message {msg.id}")
-        log_skipped_media(msg.id, "text", "Empty message body")
+                else:
+                    text_content = msg.text or msg.message
+                    if text_content:
+                        await client.send_message(tgt_entity, text_content)
+                        print(f"✉️ Sent text msg {msg.id}")
+                    else:
+                        print(f"⚠️ Skipped empty text message {msg.id}")
+                        log_skipped_media(msg.id, "text", f"Empty message body: {repr(msg.to_dict())}")
+
             # Handle pinning
             if msg.pinned:
                 try:
