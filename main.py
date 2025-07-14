@@ -69,7 +69,10 @@ async def main():
     messages = []
 
     try:
-        entity = await client.get_entity(source)
+    entity = await client.get_entity(source)
+except ValueError:
+    print(f"❌ Cannot resolve '{source}'. Please make sure it's a valid channel username or ID.")
+    return
         history = await client(GetHistoryRequest(
             peer=entity,
             limit=0,
