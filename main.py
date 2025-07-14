@@ -1,69 +1,3 @@
-import os
-import json
-from telethon.sync import TelegramClient
-from telethon.tl.functions.messages import GetHistoryRequest, UpdatePinnedMessageRequest
-from telethon.tl.types import MessageService, Message
-from tqdm import tqdm
-import asyncio
-
-CONFIG_FILE = "config.json"
-SESSION_FILE = "anon"
-SENT_LOG = "sent_ids.txt"
-ERROR_LOG = "errors.txt"
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    else:
-        return {}
-
-def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
-
-def prompt_config():
-    print("First-time setup or edit config.")
-    api_id = int(input("API ID: "))
-    api_hash = input("API Hash: ")
-    phone = input("Phone (with country code): ")
-    source_channel = input("Source Channel NAME (not username): ")
-    target_channel = input("Target Channel NAME (not username): ")
-
-    config = {
-        "api_id": api_id,
-        "api_hash": api_hash,
-        "phone": phone,
-        "source_channel": source_channel,
-        "target_channel": target_channel
-    }
-    save_config(config)
-    return config
-
-def prompt_edit_channels(config):
-    print("Current Channels:")
-    print(f"Source: {config['source_channel']}")
-    print(f"Target: {config['target_channel']}")
-    if input("Edit source/target? (y/N): ").lower() == 'y':
-        config['source_channel'] = input("New Source Channel NAME: ")
-        config['target_channel'] = input("New Target Channel NAME: ")
-        save_config(config)
-    return config
-
-def load_sent_ids():
-    if not os.path.exists(SENT_LOG):
-        return set()
-    with open(SENT_LOG, "r") as f:
-        return set(map(int, f.read().splitlines()))
-
-def save_sent_id(msg_id):
-    with open(SENT_LOG, "a") as f:
-        f.write(f"{msg_id}\n")
-
-def log_error(error):
-    with open(ERROR_LOG, "a") as f:
-        f.write(f"{error}\n")
-
 async def main():
     config = load_config() or prompt_config()
     config = prompt_edit_channels(config)
@@ -71,11 +5,16 @@ async def main():
     client = TelegramClient(SESSION_FILE, config['api_id'], config['api_hash'])
     await client.start(phone=config['phone'])
 
-    try:
-        source = await client.get_entity(config['source_channel'])
-        target = await client.get_entity(config['target_channel'])
-    except Exception as e:
-        log_error(f"Failed to fetch entities: {e}")
+    # Get channel by title from dialogs (since we only have name, not username or ID)
+    source = target = None
+    async for dialog in client.iter_dialogs():
+        if dialog.name == config['source_channel']:
+            source = dialog.entity
+        if dialog.name == config['target_channel']:
+            target = dialog.entity
+
+    if not source or not target:
+        print("Source or Target channel not found in your dialogs. Are you a member?")
         return
 
     sent_ids = load_sent_ids()
@@ -83,7 +22,7 @@ async def main():
     offset_id = 0
     limit = 100
 
-    print("Fetching messages...")
+    print("Fetching messages from source...")
     while True:
         history = await client(GetHistoryRequest(
             peer=source,
@@ -101,9 +40,13 @@ async def main():
         all_messages.extend(messages)
         offset_id = messages[-1].id
 
-    new_messages = [msg for msg in all_messages if msg.id not in sent_ids and isinstance(msg, Message)]
+    new_messages = [
+        msg for msg in all_messages
+        if isinstance(msg, Message) and msg.id not in sent_ids
+    ]
 
-    print(f"Found {len(new_messages)} new messages.")
+    print(f"Found {len(new_messages)} new messages to copy.")
+
     for msg in tqdm(reversed(new_messages), desc="Copying"):
         try:
             if msg.media:
@@ -116,11 +59,14 @@ async def main():
                 )
                 os.remove(file_path)
             else:
-                sent_msg = await client.send_message(
-                    target,
-                    msg.message or '',
-                    parse_mode='html'
-                )
+                if msg.message:
+                    sent_msg = await client.send_message(
+                        target,
+                        msg.message or '',
+                        parse_mode='html'
+                    )
+                else:
+                    continue  # skip empty service messages
 
             if msg.pinned:
                 await client(UpdatePinnedMessageRequest(
@@ -136,6 +82,3 @@ async def main():
 
     await client.disconnect()
     print("Done!")
-
-if __name__ == "__main__":
-    asyncio.run(main())
