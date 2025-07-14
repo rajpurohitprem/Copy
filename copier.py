@@ -1,12 +1,8 @@
-# Final version of the Telegram channel copier script using Telethon with:
-# - Reusable session and config
-# - Text + media support
-# - tqdm progress bars for message loop, media download, and upload
-# - Support for forward-restricted channels (download + upload)
-# - Error logging
-# - Source/target channel editing
-# - OTP handling once only
-# - Works in Termux
+# Updated version with full tqdm progress bars:
+# - Message cloning progress bar
+# - Download progress bar (per media)
+# - Upload progress bar (per media)
+# - Works in Termux and standard terminals
 
 import os
 import json
@@ -34,9 +30,6 @@ def load_json():
 def save_json(data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=2)
-
-async def ask_code_callback():
-    return input("Enter the code you received: ")
 
 async def get_channel_selection(client, prompt_text):
     dialogs = await client.get_dialogs()
@@ -97,10 +90,9 @@ async def clone_messages():
 
     offset_id = 0
     limit = 100
-    total_sent = 0
-
-    print("📥 Fetching messages...")
     all_messages = []
+
+    print("📥 Fetching messages from source...")
     while True:
         history = await client(GetHistoryRequest(
             peer=src_entity,
@@ -118,33 +110,40 @@ async def clone_messages():
         offset_id = history.messages[-1].id
 
     all_messages.reverse()
-    pbar = tqdm(total=len(all_messages), desc="Cloning messages")
+    message_pbar = tqdm(total=len(all_messages), desc="Cloning messages")
+
+    total_sent = 0
 
     for msg in all_messages:
-        pbar.update(1)
+        message_pbar.update(1)
         if not isinstance(msg, Message) or msg.id in sent_ids:
             continue
 
         try:
             if msg.media:
-                file_path = await client.download_media(
-                    msg,
-                    progress_callback=lambda cur, total: tqdm.write(
-                        f"📥 Downloading {cur/1024:.1f}/{total/1024:.1f} KB", end="\r"
-                    )
-                )
+                file_size = {"value": 0}
+
+                def download_callback(cur, total):
+                    file_size["value"] = total
+                    tqdm.write(f"📥 Downloading {cur/1024:.1f} KB / {total/1024:.1f} KB", end="\r")
+
+                file_path = await client.download_media(msg, progress_callback=download_callback)
+                upload_bar = tqdm(total=file_size["value"], unit='B', unit_scale=True, desc="📤 Uploading")
+
+                def upload_callback(sent, total):
+                    upload_bar.update(sent - upload_bar.n)
+
                 await client.send_file(
                     tgt_entity,
                     file_path,
                     caption=msg.text or msg.message or "",
-                    progress_callback=lambda cur, total: tqdm.write(
-                        f"📤 Uploading {cur/1024:.1f}/{total/1024:.1f} KB", end="\r"
-                    )
+                    progress_callback=upload_callback
                 )
+                upload_bar.close()
                 os.remove(file_path)
-            else:
-                if msg.text or msg.message:
-                    await client.send_message(tgt_entity, msg.text or msg.message)
+
+            elif msg.text or msg.message:
+                await client.send_message(tgt_entity, msg.text or msg.message)
 
             if msg.pinned:
                 try:
@@ -164,9 +163,8 @@ async def clone_messages():
         except Exception as e:
             log_error(f"Message ID {msg.id} failed: {str(e)}")
 
-    pbar.close()
+    message_pbar.close()
     print(f"✅ Cloning complete. {total_sent} messages sent.")
 
 if __name__ == "__main__":
     asyncio.run(clone_messages())
-
