@@ -1,6 +1,5 @@
 import os
 import json
-import shutil
 import asyncio
 from telethon.sync import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest, UpdatePinnedMessageRequest
@@ -13,11 +12,30 @@ SENT_LOG = "sent_ids.txt"
 ERROR_LOG = "errors.txt"
 SKIPPED_MEDIA_LOG = "skipped_media.txt"
 
+# Load or prompt config
+def load_config():
+    config = {}
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            config = json.load(f)
+
+    # Ask to edit config
+    ask = input("🔧 Do you want to change config? (y/n): ").lower()
+    if ask == "y":
+        config["api_id"] = int(input("API ID: "))
+        config["api_hash"] = input("API Hash: ")
+        config["phone"] = input("Phone number (with +91...): ")
+        config["source_channel"] = input("Source Channel Name: ")
+        config["target_channel"] = input("Target Channel Name: ")
+
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+
+    return config
+
+# Utility
 def load_sent_ids():
-    if os.path.exists(SENT_LOG):
-        with open(SENT_LOG, "r") as f:
-            return set(f.read().splitlines())
-    return set()
+    return set(open(SENT_LOG).read().splitlines()) if os.path.exists(SENT_LOG) else set()
 
 def save_sent_id(msg_id):
     with open(SENT_LOG, "a") as f:
@@ -31,87 +49,30 @@ def log_skipped_media(msg_id, media_type, reason):
     with open(SKIPPED_MEDIA_LOG, "a") as f:
         f.write(f"{msg_id} - {media_type} - {reason}\n")
 
-async def get_channel_selection(client, prompt_label):
-    dialogs = await client.get_dialogs()
-    channels = [d for d in dialogs if d.is_channel]
-
-    print(f"\n🔽 Select {prompt_label}:")
-    for idx, ch in enumerate(channels):
-        print(f"[{idx}] {ch.name}")
-
-    while True:
-        try:
-            choice = int(input(f"Enter number [0 - {len(channels) - 1}]: "))
-            if 0 <= choice < len(channels):
-                return channels[choice].entity
-        except:
-            pass
-        print("❌ Invalid input. Try again.")
-
-async def update_config_interactively():
-    api_id = int(input("API ID: "))
-    api_hash = input("API Hash: ")
-    phone = input("Phone number (with +91...): ")
-
-    client = TelegramClient(SESSION_FILE, api_id, api_hash)
-    await client.connect()
-
-    source = await get_channel_selection(client, "Source Channel")
-    target = await get_channel_selection(client, "Target Channel")
-
-    config = {
-        "api_id": api_id,
-        "api_hash": api_hash,
-        "phone": phone,
-        "source_id": source.id,
-        "target_id": target.id
-    }
-
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
-
-    await client.disconnect()
-    return config
-
-async def load_or_prompt_config():
-    config = {}
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-
-    change = input("🔧 Do you want to change config? (y/n): ").strip().lower()
-
-    if not config or change == "y":
-        config = await update_config_interactively()
-
-    client = TelegramClient(SESSION_FILE, config["api_id"], config["api_hash"])
-    return config, client
-
+# Main cloning function
 async def clone_messages():
-    config, client = await load_or_prompt_config()
+    config = load_config()
+
+    # 🔑 Create and start session
+    client = TelegramClient(SESSION_FILE, config["api_id"], config["api_hash"])
     await client.start(phone=config["phone"])
 
-    src_entity = await client.get_entity(config["source_id"])
-    tgt_entity = await client.get_entity(config["target_id"])
+    # ✅ Must login before this
+    dialogs = await client.get_dialogs()
+    src_entity = next((d.entity for d in dialogs if d.name == config["source_channel"]), None)
+    tgt_entity = next((d.entity for d in dialogs if d.name == config["target_channel"]), None)
 
-    history = await client(GetHistoryRequest(
-        peer=src_entity,
-        limit=0,
-        offset_date=None,
-        offset_id=0,
-        max_id=0,
-        min_id=0,
-        add_offset=0,
-        hash=0
-    ))
-    total = history.count
-    print(f"📦 Total messages to check: {total}")
+    if not src_entity or not tgt_entity:
+        print("❌ Source or target channel not found.")
+        return
 
-    messages = await client.get_messages(src_entity, limit=total)
+    messages = await client.get_messages(src_entity, limit=None)
     sent_ids = load_sent_ids()
 
     for msg in tqdm(reversed(messages), desc="Copying messages"):
-        if str(msg.id) in sent_ids or isinstance(msg, MessageService):
+        if str(msg.id) in sent_ids:
+            continue
+        if isinstance(msg, MessageService):
             continue
 
         try:
@@ -124,25 +85,17 @@ async def clone_messages():
                             file_path,
                             caption=msg.text or msg.message
                         )
+                        os.remove(file_path)
                         print(f"✅ Sent media msg {msg.id}")
-
-                        try:
-                            if os.path.isfile(file_path):
-                                os.remove(file_path)
-                            elif os.path.isdir(file_path):
-                                shutil.rmtree(file_path)
-                            print(f"🗑️ Deleted {file_path}")
-                        except Exception as e:
-                            log_error(f"Cleanup Error [{msg.id}]: {e}")
                     else:
                         log_skipped_media(msg.id, str(type(msg.media)), "download_media() returned None")
                 except Exception as e:
                     log_error(f"Media Error [{msg.id}]: {e}")
                     log_skipped_media(msg.id, str(type(msg.media)), f"EXCEPTION: {e}")
             else:
-                text_content = msg.text or msg.message
-                if text_content:
-                    await client.send_message(tgt_entity, text_content)
+                text = msg.text or msg.message
+                if text:
+                    await client.send_message(tgt_entity, text)
                     print(f"✉️ Sent text msg {msg.id}")
                 else:
                     log_skipped_media(msg.id, "text", "Empty message body")
@@ -159,10 +112,11 @@ async def clone_messages():
 
         except Exception as e:
             log_error(f"General Error [{msg.id}]: {e}")
-            print(f"❌ General error on msg {msg.id}: {e}")
+            print(f"❌ Error on msg {msg.id}: {e}")
 
     await client.disconnect()
-    print("✅ Done.")
+    print("✅ Done copying.")
 
+# Run
 if __name__ == "__main__":
     asyncio.run(clone_messages())
